@@ -1,8 +1,8 @@
 module fmul_tb;
     parameter DATA_WIDTH = 32;
-    reg [DATA_WIDTH - 1:0] a_i;
-    reg [DATA_WIDTH - 1:0] b_i;
-    wire [DATA_WIDTH - 1:0] c_o;
+    logic [DATA_WIDTH - 1:0] a_i;
+    logic [DATA_WIDTH - 1:0] b_i;
+    logic [DATA_WIDTH - 1:0] c_o;
     
     //Instanciranje DUT-a
     fmul dut (

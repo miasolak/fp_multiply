@@ -6,21 +6,21 @@ module fmul #(
     parameter MANT = 23,
     parameter BIAS = 127  
 )(
-    input [EXP + MANT:0] a_i,
-    input [EXP + MANT:0] b_i,
-    output wire [EXP + MANT:0] c_o
+    input logic [EXP + MANT:0] a_i,
+    input logic [EXP + MANT:0] b_i,
+    output logic [EXP + MANT:0] c_o
     );
     localparam DATA_WIDTH = 1 + EXP + MANT;
-    wire sign_c;
-    wire [EXP - 1:0] exp_a;
-    wire [EXP - 1:0] exp_b;
-    reg [EXP - 1:0] exp_c;
-    reg [2*MANT+1:0] pom_mant; //47 do 0
-    wire [MANT - 1:0] mant_a;
-    wire [MANT - 1:0] mant_b;
-    reg [MANT - 1:0] mant_c;
-    
-    assign sign_c = a_i[DATA_WIDTH - 1] ^ b_i[DATA_WIDTH - 1]; //ovo je moglo i u always-u da se ne bi stalno pisalo assign itd...
+    logic sign_c;
+    logic [EXP - 1:0] exp_a;
+    logic [EXP - 1:0] exp_b;
+    logic [EXP - 1:0] exp_c;
+    logic [2*MANT+1:0] pom_mant; //47 do 0
+    logic [MANT - 1:0] mant_a;
+    logic [MANT - 1:0] mant_b;
+    logic [MANT - 1:0] mant_c;
+    //odredjujemo znak izlaznog vektora, kao i eksponente i mantise ulaznih vektora
+    assign sign_c = a_i[DATA_WIDTH - 1] ^ b_i[DATA_WIDTH - 1]; 
     assign exp_a = a_i[DATA_WIDTH - 2:MANT];
     assign exp_b = b_i[DATA_WIDTH - 2:MANT];
     
@@ -29,9 +29,11 @@ module fmul #(
     
     assign c_o = (a_i == 0 || b_i == 0) ? 'h0 : {sign_c, exp_c, mant_c};
     
-    always @(*)begin
+    always_comb begin
+        //odredjujemo eksponent izlaznog vektora
         exp_c = exp_a + exp_b - BIAS;
         pom_mant = {1'b1, mant_a} * {1'b1, mant_b};
+        //vrsimo normalizaciju
         if (pom_mant[2*MANT+1] == 1'b1) begin //10 xx normalizacija
             pom_mant = pom_mant >> 1;     //sad je pom sigurno oblika: 01 46bita
             exp_c = exp_c + 1;
