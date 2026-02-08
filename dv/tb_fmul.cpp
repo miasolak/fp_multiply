@@ -42,12 +42,13 @@ static inline uint32_t f32_to_bits(float f) {
   return v.u;
 }
 static inline float bits_to_f32(uint32_t u) {
-  union { float f; uint32_t u; } v;
-  v.u = u;
-  return v.f;
+  float f;
+  static_assert(sizeof(f) == sizeof(u), "float must be 32-bit");
+  std::memcpy(&f, &u, sizeof(f));
+  return f;
 }
 
-// Help to extract sign, exp and mantissa/fraction
+// Helpers to extract sign, exp and mantissa
 static inline uint32_t sign_bit(uint32_t x) { return x >> 31; }
 static inline uint32_t exp_field(uint32_t x) { return (x >> 23) & 0xFFu; }
 static inline uint32_t frac_field(uint32_t x) { return x & 0x7FFFFFu; }
@@ -80,91 +81,134 @@ struct RefOut {
   bool inexact;
 };
 
-// Output is zero (signed), helper function to generate signed zero
+// Helper function to generate signed zero
 static inline uint32_t pack_signed_zero(uint32_t sign) {
   return (sign << 31);
 }
 
-// -----------------------------------------------------------------
-// Reference model, only qNaN, subnormals are zeros
-// -----------------------------------------------------------------
+// -------------------------------------------------------------------
+// Reference model, all NaNs are qNaN, subnormals are treated as zeros
+// -------------------------------------------------------------------
 static RefOut ref_model(uint32_t a, uint32_t b) {
   RefOut o{};
   o.y = 0;
   o.invalid = o.overflow = o.underflow = o.inexact = false;
 
-  uint32_t s = (sign_bit(a) ^ sign_bit(b)) & 1u;
+  const uint32_t s = (sign_bit(a) ^ sign_bit(b)) & 1u;
 
-  // Option B: any NaN input => constant qNaN, no invalid
+  // Any NaN input => constant qNaN
   if (is_nan_bits(a) || is_nan_bits(b)) {
     o.y = qnan_const();
     return o;
   }
 
-  // We will treat subnormals as zeros
-  bool a_eff_zero = is_zero_bits(a) || is_sub_bits(a);
-  bool b_eff_zero = is_zero_bits(b) || is_sub_bits(b);
-  // Check if infinity
-  bool a_inf = is_inf_bits(a);
-  bool b_inf = is_inf_bits(b);
+  // Treat subnormals as zero
+  const bool a_eff_zero = is_zero_bits(a) || is_sub_bits(a);
+  const bool b_eff_zero = is_zero_bits(b) || is_sub_bits(b);
 
-  // Special cases: Inf * 0 => invalid case and qNaN case
+  const bool a_inf = is_inf_bits(a);
+  const bool b_inf = is_inf_bits(b);
+
+  // Inf * 0 => invalid + qNaN
   if ((a_inf && b_eff_zero) || (b_inf && a_eff_zero)) {
     o.invalid = true;
     o.y = qnan_const();
     return o;
   }
+
   // Inf * finite => Inf
   if (a_inf || b_inf) {
     o.y = (s << 31) | (0xFFu << 23);
     return o;
   }
+
   // 0 * anything => signed zero
   if (a_eff_zero || b_eff_zero) {
     o.y = pack_signed_zero(s);
     return o;
   }
 
-  // ----------------------------------
-  // Finite normal multiply
-  // ----------------------------------
-  float fa = bits_to_f32(a);
-  float fb = bits_to_f32(b);
+  // ------------------------------------------------------------
+  // Normal finite multiply path 
+  // Inputs are normal because we threat subnormals as zeros
+  // ------------------------------------------------------------
+  const uint32_t expA_biased = exp_field(a);
+  const uint32_t expB_biased = exp_field(b);
+  const uint32_t fracA   = frac_field(a);
+  const uint32_t fracB   = frac_field(b);
 
-  long double exact = (long double)fa * (long double)fb;
-  float fres = (float)exact;
-  uint32_t fres_bits = f32_to_bits(fres);
+  // 24-bit significands with hidden 1
+  const uint32_t sigA = (1u << 23) | fracA; // [23:0]
+  const uint32_t sigB = (1u << 23) | fracB; // [23:0]
 
-  // Overflow to inf
-  if (is_inf_bits(fres_bits) && std::isfinite((double)exact)) {
+  // Unbiased exponents
+  int expA_unbiased = (int)expA_biased - 127;
+  int expB_unbiased = (int)expB_biased - 127;
+  int expP_unbiased = expA_unbiased + expB_unbiased;
+
+  // 24x24 -> 48-bit product
+  uint64_t prod = (uint64_t)sigA * (uint64_t)sigB; // up to 48 bits
+
+  // Normalize into [1,2)
+  // Leading 1 should be at bit 46
+  // If prod[47]=1, it's in [2,4) => shift right 1 and increment exponent
+  if (prod & (1ULL << 47)) {
+    prod >>= 1;
+    expP_unbiased += 1;
+  }
+
+  // upper_bits = prod[46:23]  (24 bits: hidden 1 + 23 fraction bits)
+  // G = prod[22], R = prod[21], S = OR(prod[20:0])
+  const uint32_t upper_bits = (uint32_t)((prod >> 23) & 0xFFFFFFu);
+  const uint32_t G = (uint32_t)((prod >> 22) & 1u);
+  const uint32_t R = (uint32_t)((prod >> 21) & 1u);
+  const uint32_t low21 = (uint32_t)(prod & ((1u << 21) - 1u));
+  const uint32_t S = (low21 != 0) ? 1u : 0u;
+
+  // RN ties-to-even increment rule
+  const uint32_t LSB = upper_bits & 1u;
+  const uint32_t inc = G & (R | S | LSB);
+
+  // Add increment; may carry out to bit 24 (25th bit)
+  uint32_t upper_bits_rounded = upper_bits + inc;
+  int expR_unbiased = expP_unbiased;
+
+  // Carry-out means it became 10.xxxxx (25 bits). Renormalize by shifting right 1 and exp++
+  if (upper_bits_rounded & (1u << 24)) {
+    upper_bits_rounded >>= 1;
+    expR_unbiased += 1;
+  }
+
+  // Inexact if any discarded bits were nonzero
+  if (G | R | S) o.inexact = true;
+
+  // ------------------------------------------------------------
+  // Flush to zero and overflow handling
+  // ------------------------------------------------------------
+  if (expR_unbiased > 127) {
+    // Overflow => Inf
     o.overflow = true;
     o.inexact  = true;
     o.y = (s << 31) | (0xFFu << 23);
     return o;
   }
 
-  // Flush To Zero (FTZ) output for subnormal region (< min normal)
-  const long double min_norm = std::ldexp((long double)1.0, -126);
-  if (exact != 0.0L && fabsl(exact) < min_norm) {
+  if (expR_unbiased < -126) {
+    // Would be subnormal => flush to zero
     o.underflow = true;
     o.inexact   = true;
     o.y = pack_signed_zero(s);
     return o;
   }
 
-  // Normal output, force XOR sign; preserve signed zero if it ever happens
-  if ((fres_bits & 0x7FFFFFFFu) == 0) {
-    o.y = pack_signed_zero(s);
-  } else {
-    o.y = (fres_bits & 0x7FFFFFFFu) | (s << 31);
-  }
-
-  // Inexact if not exactly representable
-  long double back = (long double)bits_to_f32(o.y);
-  if (back != exact) o.inexact = true;
+  // Normal pack
+  const uint32_t exp_out = (uint32_t)(expR_unbiased + 127) & 0xFFu;
+  const uint32_t frac_out = upper_bits_rounded & 0x7FFFFFu; // drop hidden 1
+  o.y = (s << 31) | (exp_out << 23) | frac_out;
 
   return o;
 }
+
 
 // -----------------------------------------------------------------
 // Pretty printing :)
@@ -174,55 +218,74 @@ static void print_fp(const char* label, uint32_t bits) {
   uint32_t exp  = (bits >> 23) & 0xFF;
   uint32_t man  = bits & 0x7FFFFF;
 
+  char sgnc = sign ? '-' : '+'; // Treat sign bit as character - or +
+
+  int unbiased;
+  uint32_t sig_int;             // integer significand (includes hidden 1 for normals)
+  const int sig_div_pow = 23;   // divide by 2^23 for binary32
+
+  if (exp == 0) {
+    unbiased = -126;
+    sig_int  = man; // subnormal or zero: 0.mantissa
+  } else {
+    unbiased = (int)exp - 127;
+    sig_int  = (1u << 23) | man; // normal (and exp=255): 1.mantissa
+  }
+
   if (is_nan_bits(bits)) {
     std::printf(
       "  %-8s : 0x%08x  NaN"
-      "  | s=0x%x e=0x%02x m=0x%06x\n",
-      label, bits, sign, exp, man
+      "  | s=0x%x e=0x%02x m=0x%06x"
+      "  | sgn=%c ue=%d m=%9u / 2^%d\n",
+      label, bits, sign, exp, man,
+      sgnc, unbiased, sig_int, sig_div_pow
     );
   }
   else if (is_inf_bits(bits)) {
     std::printf(
       "  %-8s : 0x%08x  %sInf"
-      "  | s=0x%x e=0x%02x m=0x%06x\n",
-      label, bits, (sign ? "-" : "+"), sign, exp, man
+      "  | s=0x%x e=0x%02x m=0x%06x"
+      "  | sgn=%c ue=%d m=%9u / 2^%d\n",
+      label, bits, (sign ? "-" : "+"), sign, exp, man,
+      sgnc, unbiased, sig_int, sig_div_pow
     );
   }
   else {
     float f = bits_to_f32(bits);
     std::printf(
-      "  %-8s : 0x%08x  %+.10e"
-      "  | s=0x%x e=0x%02x m=0x%06x\n",
-      label, bits, f, sign, exp, man
+      "  %-8s : 0x%08x  %+.20e"
+      "  | s=0x%x e=0x%02x m=0x%06x"
+      "  | sgn=%c ue=%d m=%9u / 2^%d\n",
+      label, bits, f, sign, exp, man,
+      sgnc, unbiased, sig_int, sig_div_pow
     );
   }
 }
-
 
 static void print_case(const char* status, const char* tag,
                        uint32_t a, uint32_t b,
                        uint32_t y_dut, bool inv_dut, bool ovf_dut, bool unf_dut, bool inx_dut,
                        uint32_t y_ref, bool inv_ref, bool ovf_ref, bool unf_ref, bool inx_ref) {
-  std::printf("\n================================== %s [%s] ==================================\n", status, tag);
+  std::printf("\n==================================================== %s [%s] ====================================================\n", status, tag);
 
   print_fp("a", a);
   print_fp("b", b);
 
-  std::printf("\n--- DUT ---\n");
+  std::printf("\n ------------------------------------------------------- DUT ------------------------------------------------------- \n");
   print_fp("y", y_dut);
-  std::printf("  flags: invalid=%d overflow=%d underflow=%d inexact=%d\n",
+  std::printf("  flags    : invalid=%d overflow=%d underflow=%d inexact=%d\n",
               (int)inv_dut, (int)ovf_dut, (int)unf_dut, (int)inx_dut);
 
-  std::printf("\n--- REF ---\n");
+  std::printf("\n ------------------------------------------------------- REF ------------------------------------------------------- \n\n");
   print_fp("y", y_ref);
-  std::printf("  flags: invalid=%d overflow=%d underflow=%d inexact=%d\n",
+  std::printf("  flags    : invalid=%d overflow=%d underflow=%d inexact=%d\n",
               (int)inv_ref, (int)ovf_ref, (int)unf_ref, (int)inx_ref);
 
-  std::printf("=================================================================================\n");
+  std::printf("=====================================================================================================================\n");
 }
 
 // -----------------------------------------------------------------
-// Eval + optional trace
+// Evaluation + optional trace
 // -----------------------------------------------------------------
 static inline void tick_eval(Vfmul* dut,
                              VerilatedVcdC* tfp,
@@ -244,7 +307,6 @@ static bool run_one(Vfmul* dut,
   dut->a = a;
   dut->b = b;
 
-  // a couple evals gives nicer waveform context
   tick_eval(dut, tfp, t);
   tick_eval(dut, tfp, t);
 
@@ -256,10 +318,10 @@ static bool run_one(Vfmul* dut,
 
   RefOut r = ref_model(a, b);
 
-  // Always check result bits
+  // Check result bits
   bool ok_y = (y_dut == r.y);
 
-  // Optionally check flags
+  // Check flags (optionally)
   bool ok_flags = true;
   if (CHECK_FLAGS) {
     ok_flags = (inv_dut == r.invalid) &&
@@ -380,11 +442,11 @@ int main(int argc, char** argv) {
     delete tfp;
   }
 
-  std::printf("\n---------------------------------------------------------------------------------\n");
+  std::printf("\n---------------------------------------------------------------------------------------------------------------------\n");
   std::printf("Tests run : %llu\n", (unsigned long long)tests);
   std::printf("Failures  : %llu\n", (unsigned long long)fails);
   std::printf("Flag check: %s\n", CHECK_FLAGS ? "ENABLED (--check-flags)" : "DISABLED");
-  std::printf("---------------------------------------------------------------------------------\n");
+  std::printf("---------------------------------------------------------------------------------------------------------------------\n");
 
   delete dut;
   return (fails == 0) ? 0 : 1;

@@ -1,2 +1,3 @@
 # Ignore Verilator objects
 obj_dir/
+*.vcd
