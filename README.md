@@ -1,6 +1,6 @@
 # Floating Point Multiplier 
 
-A hardware implementation of a **floating-point multiplier** in **Verilog/SystemVerilog**, designed for simulation and verification with **Verilator**.
+A hardware implementation of a **floating-point multiplier** in **SystemVerilog**, designed for simulation and verification with **Verilator**.
 
 This project implements a parameterized floating-point multiplication unit for IEEE-754-style single-precision operands, with support for special-case detection and exception flag generation. The design handles normal multiplication flow as well as corner cases such as **zero, subnormal inputs, infinity, NaN, overflow, underflow, and inexact results**.
 
