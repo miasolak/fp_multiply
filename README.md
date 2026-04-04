@@ -1,4 +1,4 @@
-# Floating Point Multiplier (Verilog)
+# Floating Point Multiplier 
 
 A hardware implementation of a **floating-point multiplier** in **Verilog/SystemVerilog**, designed for simulation and verification with **Verilator**.
 
