@@ -17,12 +17,6 @@ The core of this repository is the `fmul` RTL module, which performs floating-po
 - normalizing and rounding the mantissa
 - generating status flags for exceptional conditions
 
-This project is intended as a practical RTL design and verification exercise, useful for learning and demonstrating:
-
-- floating-point arithmetic hardware design
-- bit-level datapath development
-- exception handling in digital systems
-- simulation and debugging with Verilator
 
 ## Features
 
@@ -147,16 +141,6 @@ Make sure **Verilator** is installed on your system before running the script.
 - **Verilog / SystemVerilog**
 - **Verilator**
 
-## Learning Goals
-
-This project was built to strengthen practical skills in:
-
-- RTL design of arithmetic units
-- floating-point number representation
-- exception and corner-case handling
-- datapath and control design
-- simulation and debugging
-- hardware verification workflow
 
 ## Possible Future Improvements
 
