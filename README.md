@@ -152,7 +152,3 @@ Some natural next steps for the project would be:
 - support for additional precisions
 - pipelined version for higher throughput
 - integration into a larger floating-point unit or processor datapath
-
-## Author
-
-Designed and implemented as a digital design / RTL project focused on floating-point multiplication, special-case handling, and hardware verification.
